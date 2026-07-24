@@ -166,6 +166,33 @@ public class RealmTests : IDisposable
     });
 
     [Fact]
+    public void Merge_remaps_unknown_hashes_to_installed_versions() => OnRealmThread(() =>
+    {
+        const string installedHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        const string apiHash = "dddddddddddddddddddddddddddddddd";
+        // an installed map whose local version differs from the online hash
+        using (var realm = LazerRealm.Open(realmPath))
+            realm.Write(() => realm.Add(new BeatmapInfo
+            {
+                ID = Guid.NewGuid(),
+                OnlineID = 777,
+                MD5Hash = installedHash,
+            }));
+
+        var incoming = new[] { new RawCollection("Remap", new[] { apiHash }) };
+        MergeStats stats;
+        using (var realm = LazerRealm.Open(realmPath))
+            stats = LazerRealm.Merge(realm, incoming, replace: false,
+                new Dictionary<string, int> { [apiHash] = 777 });
+
+        Assert.Equal(1, stats.Remapped);
+        Assert.Equal(0, stats.NotInstalled);
+        using var check = LazerRealm.Open(realmPath);
+        var col = check.All<BeatmapCollection>().Single(c => c.Name == "Remap");
+        Assert.Equal(new[] { installedHash }, col.BeatmapMD5Hashes);
+    });
+
+    [Fact]
     public void Backup_creates_copy() => OnRealmThread(() =>
     {
         string backup = LazerRealm.Backup(realmPath);

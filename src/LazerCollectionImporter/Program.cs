@@ -17,6 +17,10 @@ const string usage = """
     Options:
       --realm <path>  client.realm file or lazer data folder (default: auto-detect,
                       honors a custom folder configured in storage.ini)
+      --ids <path>    JSON file mapping md5 -> online beatmap id. Hashes that
+                      match no installed map are remapped to the hash of the
+                      INSTALLED version of the same beatmap (outdated local
+                      maps then still show up in the collection)
       --replace       replace the content of same-name collections instead of merging
       --dry-run       parse and show what would be imported, write nothing
       --list          list the collections currently in lazer, then exit
@@ -31,6 +35,7 @@ const string usage = """
 
 var files = new List<string>();
 string? realmOverride = null;
+string? idsPath = null;
 bool replace = false, dryRun = false, list = false, force = false, yes = false;
 
 for (int i = 0; i < args.Length; i++)
@@ -43,6 +48,10 @@ for (int i = 0; i < args.Length; i++)
         case "--realm":
             if (i + 1 >= args.Length) return Fail("--realm requires a path.");
             realmOverride = args[++i];
+            break;
+        case "--ids":
+            if (i + 1 >= args.Length) return Fail("--ids requires a path.");
+            idsPath = args[++i];
             break;
         case "--replace": replace = true; break;
         case "--dry-run": dryRun = true; break;
@@ -94,6 +103,23 @@ try
 
     if (collections.Count == 0) return Fail("No collections found in the given file(s).");
 
+    // optional md5 -> online beatmap id mapping (remap to installed versions)
+    IReadOnlyDictionary<string, int>? onlineIds = null;
+    if (idsPath != null)
+    {
+        if (!File.Exists(idsPath)) return Fail($"File not found: \"{idsPath}\"");
+        try
+        {
+            var rawIds = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, int>>(
+                File.ReadAllText(idsPath)) ?? new Dictionary<string, int>();
+            onlineIds = rawIds.ToDictionary(kv => kv.Key.ToLowerInvariant(), kv => kv.Value);
+        }
+        catch (System.Text.Json.JsonException e)
+        {
+            return Fail($"Invalid --ids JSON: {e.Message}");
+        }
+    }
+
     if (dryRun)
     {
         Console.WriteLine("\nDry run - nothing was written.");
@@ -120,10 +146,10 @@ try
 
     MergeStats stats;
     using (var realm = LazerRealm.Open(realmPath))
-        stats = LazerRealm.Merge(realm, collections, replace);
+        stats = LazerRealm.Merge(realm, collections, replace, onlineIds);
 
     // stable machine-readable line for callers (e.g. the tracker's server)
-    Console.WriteLine($"RESULT created={stats.CollectionsCreated} updated={stats.CollectionsUpdated} hashes={stats.HashesAdded} invalid={stats.InvalidHashesSkipped}");
+    Console.WriteLine($"RESULT created={stats.CollectionsCreated} updated={stats.CollectionsUpdated} hashes={stats.HashesAdded} invalid={stats.InvalidHashesSkipped} remapped={stats.Remapped} notinstalled={stats.NotInstalled}");
     Console.WriteLine($"""
 
         Done.
@@ -131,6 +157,8 @@ try
           collections updated : {stats.CollectionsUpdated}
           hashes written      : {stats.HashesAdded}
           invalid hashes      : {stats.InvalidHashesSkipped}
+          remapped to your installed versions : {stats.Remapped}
+          maps not installed  : {stats.NotInstalled}
 
         Start osu!lazer to see your collections. Maps you don't have installed
         stay in the collection and appear once you download them.

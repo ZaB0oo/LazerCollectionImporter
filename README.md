@@ -13,6 +13,9 @@ LazerCollectionImporter <files...> [options]
 
 --realm <path>  client.realm file or lazer data folder (default: auto-detect,
                 including a custom folder configured in storage.ini)
+--ids <path>    JSON file mapping md5 -> online beatmap id; hashes that match
+                no installed map are remapped to the hash of the installed
+                version of the same beatmap (see below)
 --replace       replace the content of same-name collections (default: merge)
 --dry-run       show what would be imported, write nothing
 --list          list the collections currently in lazer
@@ -51,6 +54,10 @@ lazer stores collections in `client.realm` (a [Realm](https://github.com/realm/r
 5. **Same Realm package version as the game** (20.1.0, see [osu.Game.csproj](https://github.com/ppy/osu/blob/master/osu.Game/osu.Game.csproj)): the realm-core file format can never be silently upgraded.
 
 Close osu!lazer before importing (the tool checks). Maps you don't have installed stay in the collection and appear once you download them.
+
+### Outdated local maps (`--ids`)
+
+Collections reference maps by the MD5 of their `.osu` file — so a map you downloaded before the mapper last updated it has a **different hash** than the current online version, and a collection built from online hashes won't show it. With `--ids` (a JSON object `{"<md5>": <beatmap id>, ...}`), the importer reads the installed beatmaps from `client.realm` (read-only) and substitutes any unmatched hash with the hash of the **installed version** of the same beatmap. The summary reports how many hashes were remapped and how many maps are simply not installed.
 
 ## Limitations
 

@@ -8,7 +8,9 @@ public sealed record MergeStats(
     int CollectionsCreated,
     int CollectionsUpdated,
     int HashesAdded,
-    int InvalidHashesSkipped);
+    int InvalidHashesSkipped,
+    int Remapped,
+    int NotInstalled);
 
 /// <summary>
 /// Safe access to osu!lazer's client.realm.
@@ -19,8 +21,9 @@ public sealed record MergeStats(
 ///   as "client_newer_version.realm" on next launch. We therefore probe with
 ///   version 0 (always throws before modifying anything), parse the file's
 ///   actual version from the error message, and reopen with exactly that.
-/// - Only declare the BeatmapCollection table in our schema: realm leaves all
-///   other tables untouched when they are not part of the opened schema.
+/// - Only declare the tables we need: the collection table (written) and the
+///   beatmap tables (read-only, for hash matching); realm leaves all other
+///   tables untouched when they are not part of the opened schema.
 /// - Merge by collection name (same behaviour as lazer's own
 ///   LegacyCollectionImporter); nothing is ever deleted implicitly.
 /// </summary>
@@ -28,6 +31,26 @@ public static partial class LazerRealm
 {
     [GeneratedRegex(@"(\d+)(?!.*\d)")]
     private static partial Regex LastNumberRegex();
+
+    /// <summary>
+    /// Tables we declare: the collection table (written) and the beatmap
+    /// tables (READ-ONLY, to match hashes against the installed maps and
+    /// remap by online id). Realm requires every linked class to be declared;
+    /// all other tables stay untouched.
+    /// </summary>
+    private static readonly Type[] lazer_schema =
+    {
+        typeof(BeatmapCollection),
+        typeof(BeatmapInfo),
+        typeof(BeatmapSetInfo),
+        typeof(BeatmapMetadata),
+        typeof(BeatmapDifficulty),
+        typeof(BeatmapUserSettings),
+        typeof(RulesetInfo),
+        typeof(RealmUser),
+        typeof(RealmFile),
+        typeof(RealmNamedFileUsage),
+    };
 
     /// <summary>Finds client.realm: explicit path, else %APPDATA%\osu (honoring storage.ini).</summary>
     public static string ResolvePath(string? overridePath)
@@ -82,7 +105,7 @@ public static partial class LazerRealm
         var config = new RealmConfiguration(realmPath)
         {
             SchemaVersion = fileVersion,
-            Schema = new[] { typeof(BeatmapCollection) },
+            Schema = lazer_schema,
         };
 
         try
@@ -93,7 +116,7 @@ public static partial class LazerRealm
         {
             throw new InvalidOperationException(
                 "Could not open the osu!lazer database (schema version " + fileVersion + "). " +
-                "The BeatmapCollection table may have changed in a recent lazer update - " +
+                "One of the declared tables may have changed in a recent lazer update - " +
                 "please report this. Original error: " + e.Message, e);
         }
     }
@@ -108,7 +131,7 @@ public static partial class LazerRealm
         var probe = new RealmConfiguration(realmPath)
         {
             SchemaVersion = 0,
-            Schema = new[] { typeof(BeatmapCollection) },
+            Schema = lazer_schema,
         };
 
         try
@@ -148,10 +171,30 @@ public static partial class LazerRealm
     [GeneratedRegex("^[0-9a-f]{32}$")]
     private static partial Regex Md5Regex();
 
-    /// <summary>Merges collections into the realm. Never deletes collections.</summary>
-    public static MergeStats Merge(Realm realm, IEnumerable<RawCollection> incoming, bool replace)
+    /// <summary>
+    /// Merges collections into the realm. Never deletes collections.
+    /// `onlineIds` (md5 -> online beatmap id, optional): a hash that matches
+    /// no installed map is substituted with the hash of the INSTALLED version
+    /// of the same beatmap when possible — so collections stay complete even
+    /// when local maps are outdated relative to the online (API) hashes.
+    /// </summary>
+    public static MergeStats Merge(
+        Realm realm,
+        IEnumerable<RawCollection> incoming,
+        bool replace,
+        IReadOnlyDictionary<string, int>? onlineIds = null)
     {
-        int created = 0, updated = 0, added = 0, invalid = 0;
+        int created = 0, updated = 0, added = 0, invalid = 0, remapped = 0, notInstalled = 0;
+
+        // Installed maps lookup (read-only pass, hidden/soft-deleted excluded).
+        var installed = new HashSet<string>(StringComparer.Ordinal);
+        var hashByOnlineId = new Dictionary<int, string>();
+        foreach (var b in realm.All<BeatmapInfo>())
+        {
+            if (b.Hidden || string.IsNullOrEmpty(b.MD5Hash)) continue;
+            installed.Add(b.MD5Hash);
+            if (b.OnlineID > 0) hashByOnlineId.TryAdd(b.OnlineID, b.MD5Hash);
+        }
 
         realm.Write(() =>
         {
@@ -167,6 +210,22 @@ public static partial class LazerRealm
                 {
                     string h = raw.Trim().ToLowerInvariant();
                     if (!Md5Regex().IsMatch(h)) { invalid++; continue; }
+                    if (!installed.Contains(h))
+                    {
+                        // unknown hash: remap to the installed version of the
+                        // same beatmap when we know its online id
+                        if (onlineIds != null
+                            && onlineIds.TryGetValue(h, out int onlineId)
+                            && hashByOnlineId.TryGetValue(onlineId, out string? installedHash))
+                        {
+                            h = installedHash;
+                            remapped++;
+                        }
+                        else
+                        {
+                            notInstalled++; // kept anyway: appears once downloaded
+                        }
+                    }
                     if (seen.Add(h)) hashes.Add(h);
                 }
 
@@ -219,6 +278,6 @@ public static partial class LazerRealm
             }
         });
 
-        return new MergeStats(created, updated, added, invalid);
+        return new MergeStats(created, updated, added, invalid, remapped, notInstalled);
     }
 }
